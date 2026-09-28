@@ -74,6 +74,31 @@ enum {
 };
 
 //--------------------------------------------------------------------+
+// Bounded hardware waits
+//--------------------------------------------------------------------+
+// A wedged controller (PHY glitch, bus noise) must never spin forever, since some of these
+// waits run in IRQ context. Each iteration is a register read plus loop overhead (roughly
+// 15 cycles at 168MHz), so one million iterations cap a wait at about 90ms - far above any
+// legitimate handshake and far below the watchdog timeout.
+#ifndef DWC2_HW_WAIT_LIMIT
+#define DWC2_HW_WAIT_LIMIT (1000000U)
+#endif
+// Upper bound for draining the RX FIFO: no legitimate burst keeps RXFLVL asserted for
+// 65536 packets (>= 4MB at 64B packets) in a single interrupt.
+#ifndef DWC2_RXFLVL_DRAIN_LIMIT
+#define DWC2_RXFLVL_DRAIN_LIMIT (65536U)
+#endif
+
+// Reports a wedged hardware handshake: masks all DWC2 core interrupt sources so this IRQ
+// cannot fire again, and raises a recovery flag observed by the main loop (see
+// dwc2_recovery_required), which then stops feeding the watchdog for a clean SoC reset.
+// Defined in dwc2_common.c.
+void dwc2_hw_report_timeout(dwc2_regs_t* dwc2);
+
+// Returns true once dwc2_hw_report_timeout() has fired. Defined in dwc2_common.c.
+bool dwc2_recovery_required(void);
+
+//--------------------------------------------------------------------+
 // Core/Controller
 //--------------------------------------------------------------------+
 TU_ATTR_ALWAYS_INLINE static inline dwc2_regs_t* DWC2_REG(uint8_t rhport) {
@@ -94,13 +119,25 @@ void dwc2_core_handle_common_irq(uint8_t rhport, bool in_isr);
 TU_ATTR_ALWAYS_INLINE static inline void dfifo_flush_tx(dwc2_regs_t* dwc2, uint8_t fnum) {
   // flush TX fifo and wait for it cleared
   dwc2->grstctl = GRSTCTL_TXFFLSH | (fnum << GRSTCTL_TXFNUM_Pos);
-  while (0 != (dwc2->grstctl & GRSTCTL_TXFFLSH_Msk)) {}
+  uint32_t wait = DWC2_HW_WAIT_LIMIT;
+  while (0 != (dwc2->grstctl & GRSTCTL_TXFFLSH_Msk)) {
+    if (--wait == 0) {
+      dwc2_hw_report_timeout(dwc2);
+      return;
+    }
+  }
 }
 
 TU_ATTR_ALWAYS_INLINE static inline void dfifo_flush_rx(dwc2_regs_t* dwc2) {
   // flush RX fifo and wait for it cleared
   dwc2->grstctl = GRSTCTL_RXFFLSH;
-  while (0 != (dwc2->grstctl & GRSTCTL_RXFFLSH_Msk)) {}
+  uint32_t wait = DWC2_HW_WAIT_LIMIT;
+  while (0 != (dwc2->grstctl & GRSTCTL_RXFFLSH_Msk)) {
+    if (--wait == 0) {
+      dwc2_hw_report_timeout(dwc2);
+      return;
+    }
+  }
 }
 
 void dfifo_read_packet(dwc2_regs_t* dwc2, uint8_t* dst, uint16_t len);

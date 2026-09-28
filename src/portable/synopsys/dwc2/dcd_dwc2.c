@@ -303,11 +303,23 @@ static void edpt_disable(uint8_t rhport, uint8_t ep_addr, bool stall) {
     } else {
       // Stop transmitting packets and NAK IN xfers.
       dep->diepctl |= DIEPCTL_SNAK;
-      while ((dep->diepint & DIEPINT_INEPNE) == 0) {}
+      uint32_t wait = DWC2_HW_WAIT_LIMIT;
+      while ((dep->diepint & DIEPINT_INEPNE) == 0) {
+        if (--wait == 0) {
+          dwc2_hw_report_timeout(dwc2);
+          return;
+        }
+      }
 
       // Disable the endpoint.
       dep->diepctl |= DIEPCTL_EPDIS | stall_mask;
-      while ((dep->diepint & DIEPINT_EPDISD_Msk) == 0) {}
+      wait = DWC2_HW_WAIT_LIMIT;
+      while ((dep->diepint & DIEPINT_EPDISD_Msk) == 0) {
+        if (--wait == 0) {
+          dwc2_hw_report_timeout(dwc2);
+          return;
+        }
+      }
 
       dep->diepint = DIEPINT_EPDISD;
     }
@@ -322,14 +334,26 @@ static void edpt_disable(uint8_t rhport, uint8_t ep_addr, bool stall) {
     } else {
       // Asserting GONAK is required to STALL an OUT endpoint.
       // Simpler to use polling here, we don't use the "B"OUTNAKEFF interrupt
-      // anyway, and it can't be cleared by user code. If this while loop never
-      // finishes, we have bigger problems than just the stack.
+      // anyway, and it can't be cleared by user code. Bounded so a wedged controller
+      // cannot spin forever here (this may run in IRQ context).
       dwc2->dctl |= DCTL_SGONAK;
-      while ((dwc2->gintsts & GINTSTS_BOUTNAKEFF_Msk) == 0) {}
+      uint32_t wait = DWC2_HW_WAIT_LIMIT;
+      while ((dwc2->gintsts & GINTSTS_BOUTNAKEFF_Msk) == 0) {
+        if (--wait == 0) {
+          dwc2_hw_report_timeout(dwc2);
+          return;
+        }
+      }
 
       // Ditto here disable the endpoint.
       dep->doepctl |= DOEPCTL_EPDIS | stall_mask;
-      while ((dep->doepint & DOEPINT_EPDISD_Msk) == 0) {}
+      wait = DWC2_HW_WAIT_LIMIT;
+      while ((dep->doepint & DOEPINT_EPDISD_Msk) == 0) {
+        if (--wait == 0) {
+          dwc2_hw_report_timeout(dwc2);
+          return;
+        }
+      }
 
       dep->doepint = DOEPINT_EPDISD;
 
@@ -1183,8 +1207,14 @@ void dcd_int_handler(uint8_t rhport) {
     // RXFLVL bit is read-only
     dwc2->gintmsk &= ~GINTMSK_RXFLVLM; // disable RXFLVL interrupt while reading
 
+    uint32_t drain = DWC2_RXFLVL_DRAIN_LIMIT;
     do {
       handle_rxflvl_irq(rhport); // read all packets
+      if (--drain == 0) {
+        // RXFLVL stuck asserted: wedged controller, stop before spinning in IRQ context.
+        dwc2_hw_report_timeout(dwc2);
+        return;
+      }
     } while(dwc2->gintsts & GINTSTS_RXFLVL);
 
     dwc2->gintmsk |= GINTMSK_RXFLVLM;

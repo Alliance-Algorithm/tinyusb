@@ -32,6 +32,22 @@
 #include "dwc2_common.h"
 
 //--------------------------------------------------------------------
+// Bounded hardware wait recovery
+//--------------------------------------------------------------------
+static volatile bool dwc2_hw_timed_out = false;
+
+void dwc2_hw_report_timeout(dwc2_regs_t* dwc2) {
+  // Mask every core interrupt source: the wedge condition would otherwise re-enter this IRQ
+  // forever. The IRQ line deasserts once (gintsts & gintmsk) is zero.
+  dwc2->gintmsk = 0;
+  dwc2_hw_timed_out = true;
+}
+
+bool dwc2_recovery_required(void) {
+  return dwc2_hw_timed_out;
+}
+
+//--------------------------------------------------------------------
 //
 //--------------------------------------------------------------------
 static void reset_core(dwc2_regs_t* dwc2) {
